@@ -1,0 +1,721 @@
+Active Messaging Interface
+==========================
+
+   Active message communication is formulated as logically matching
+request and reply operations. Upon receipt of a request message, a
+request handler is invoked; likewise, when a reply message is received,
+the reply handler is invoked. Request handlers can reply at most once
+to the requesting node. If no explicit reply is made, the layer may
+generate one (to an implicit do-nothing reply handler). Thus a request
+handler can call reply at most once, and may only reply to the
+requesting node. Reply handlers cannot request or reply.
+
+   Here is a high-level description of a typical active message exchange
+between two nodes, A and B:
+
+  1. A calls `gasnet_AMRequest*()' to send a request to B.  The call
+     includes arguments, data payload, the node index of B and the
+     index of the request handler to run on B when the request arrives
+
+  2. At some later time, B receives the request, and runs the
+     appropriate request handler with the arguments and data (if any)
+     provided in the `gasnet_AMRequest*()' call.    The request handler
+     does some work on the arguments, and usually finishes by calling
+     `gasnet_AMReply*()' to issue a reply message before it exits
+     (replying is optional in GASNet, but required in AM2 - if the
+     request handler does not reply then no further actions are taken).
+      `gasnet_AMReply*()' takes the token passed to the request
+     handler, arguments and data payload, and the index of the reply
+     handler to run when the reply message arrives. It does not take a
+     node index because a request handler is only permitted to send a
+     reply to the requesting node
+
+  3. At some later time, A receives the reply message from B and runs
+     the appropriate reply handler, with the arguments and data (if
+     any) provided in the `gasnet_AMReply*()' call.    The reply
+     handler does some work on the arguments and then exits. It is not
+     permitted to send further messages.
+
+   The message layer will deliver requests and replies to destination
+nodes barring any catastrophic errors (e.g. node crashes). From a
+sender's point of view, the request and reply functions block until the
+message is sent. A message is defined to be sent once it is safe for
+the caller to reuse the storage (registers or memory) containing the
+message (one notable exception to this policy is
+`gasnet_RequestLongAsyncM()'). In implementations which copy or buffer
+messages for transmission, the definition still holds: message sent
+means the layer has copied the message and promises to deliver the copy
+with its "best effort", and the original message storage may be reused.
+By best effort, the message layer promises it will take care of all the
+details necessary to transmit the message. These details include any
+retransmission attempts and buffering issues on unreliable networks.
+
+   However, in either case, sent does not imply received. Once control
+returns from a request or reply function, clients cannot assume that
+the message has been received and handled at the destination. The
+message layer only guarantees that if a request or reply is sent, and,
+if the receiver occasionally polls for arriving messages, then the
+message will eventually be received and handled. From a receiver's
+point of view, a message is defined to be received only once its
+handler function is invoked. The contents of partially received
+messages and messages whose handlers have not executed are undefined.
+
+   If the client sends an AM request or AM reply to a handler index
+which has not been registered on the destination node, GASNet will
+print an implementation-defined error message and terminate the job. It
+is implementation-defined whether this checking happens on the sending
+or receiving node.
+
+Active Message Categories
+-------------------------
+
+   There are three categories of active messages:
+
+`Short Active Message'
+     These messages carry only a few integer arguments (up to
+     `gasnet_AMMaxArgs()')
+     handler prototype:
+          void handler(gasnet_token_t token,
+                       gasnet_handlerarg_t arg0, ... gasnet_handlerarg_t argM-1);
+
+`Medium Active Message'
+     In addition to integer arguments, these messages can can carry an
+     opaque data payload (up to `gasnet_AMMaxMedium()' bytes in
+     length), that will be made available to the handler when it is run
+     on the remote node.
+     handler prototype:
+          void handler(gasnet_token_t token,
+                       void *buf, size_t nbytes,
+                       gasnet_handlerarg_t arg0, ... gasnet_handlerarg_t argM-1);
+
+`Long Active Message'
+     In addition to integer arguments, these messages can carry an
+     opaque data payload (up to `gasnet_AMMaxLong()' bytes in length)
+     which is destined for a particular predetermined address in the
+     segment of the remote node (often implemented using RDMA hardware
+     assistance)
+     handler prototype:
+          void handler(gasnet_token_t token,
+                       void *buf, size_t nbytes,
+                       gasnet_handlerarg_t arg0, ... gasnet_handlerarg_t argM-1);
+
+   For more discussion on these three categories, see the Appendix.
+
+   The number of handler arguments (M) is specified upon issuing a
+request or reply by choosing the request/reply function of the
+appropriate name. The category of message and value of M used in the
+request/reply message sends determines the appropriate handler
+prototype, as detailed above. If a request or reply is sent to a
+handler whose prototype does not match the requirements as detailed
+above, the result is undefined.
+
+   *Implementor's Note:*
+   * Some implementations may choose to optimize medium and long
+     messages for payloads whose base address and length are aligned
+     with certain convenient sizes (word-aligned, doubleword-aligned,
+     page-aligned etc.) but this does not affect correctness.
+
+
+Active Message Size Limits
+--------------------------
+
+   These functions are used to query the maximum size messages of each
+category supported by a given implementation. These are likely to be
+implemented as macros for efficiency of client code which uses them
+(within packing loops, etc.)
+
+gasnet_AMMaxArgs
+................
+
+ - : size_t gasnet_AMMaxArgs ()
+     Returns the maximum number of handler arguments (i.e. M) that may
+     be passed with any AM request or reply function. This value is
+     guaranteed to be at least `(2 * MAX(sizeof(int),sizeof(void*)))'
+     (i.e. 8 for 32-bit systems, 16 for 64-bit systems), which ensures
+     that 8 ints and/or pointers can be sent with any active message.
+     All implementations must support _all_ values of M from
+     0...`gasnet_AMMaxArgs()'.
+
+gasnet_AMMaxMedium
+..................
+
+ - : size_t gasnet_AMMaxMedium ()
+     Returns the maximum number of bytes that can be sent in the
+     payload of a single medium AM request or reply. This value is
+     guaranteed to be at least 512 bytes on any implementation.
+
+gasnet_AMMaxLongRequest
+.......................
+
+ - : size_t gasnet_AMMaxLongRequest ()
+     Returns the maximum number of bytes that can be sent in the
+     payload of a single long AM request. This value is guaranteed to
+     be at least 512 bytes on any implementation. Implementations which
+     use RDMA to implement long messages are likely to support a much
+     larger value.
+
+gasnet_AMMaxLongReply
+.....................
+
+ - : size_t gasnet_AMMaxLongReply ()
+     Returns the maximum number of bytes that can be sent in the
+     payload of a single long AM reply. This value is guaranteed to be
+     at least 512 bytes on any implementation. Implementations which
+     use RDMA to implement long messages are likely to support a much
+     larger value.
+
+Active Message Request Functions
+--------------------------------
+
+   In the function descriptions below, M is to be replaced with a
+number in [0 ... `gasnet_AMMaxArgs()']
+
+gasnet_AMRequestShortM
+......................
+
+ - : int gasnet_AMRequestShortM ( gasnet_node_t DEST, gasnet_handler_t
+          HANDLER, gasnet_handlerarg_t ARG0, ..., gasnet_handlerarg_t
+          ARGM-1 );
+     Send a short AM request to node DEST, to run the handler
+     registered on the destination node at handler table index HANDLER,
+     with the given M arguments.  `gasnet_AMRequestShortM' returns
+     control to the calling thread of computation after sending the
+     request message. Upon receipt, the receiver invokes the
+     appropriate active message request handler function with the M
+     integer arguments.  Returns `GASNET_OK' on success.
+
+gasnet_AMRequestMediumM
+.......................
+
+ - : int gasnet_AMRequestMediumM ( gasnet_node_t DEST, gasnet_handler_t
+          HANDLER, void *SOURCE_ADDR, size_t NBYTES,
+          gasnet_handlerarg_t ARG0, ..., gasnet_handlerarg_t ARGM-1 )
+     Send a medium AM request to node DEST, to run the handler
+     registered on the destination node at handler table index HANDLER,
+     with the given M arguments.
+
+     The message also carries a data payload copied from the local
+     node's memory space as indicated by SOURCE_ADDR and NBYTES (which
+     need not fall within the registered data segment on the local
+     node).  The value of NBYTES must be no larger than the value
+     returned by `gasnet_AMMaxMedium()', and is permitted to be zero
+     (in which case SOURCE_ADDR is ignored and the BUF value passed to
+     the handler is undefined).
+
+     `gasnet_AMRequestMediumM' returns control to the calling thread of
+     computation after sending the associated request, and the source
+     memory may be freely modified once the function returns. The
+     active message is logically delivered after the data transfer
+     finishes.
+
+     Upon receipt, the receiver invokes the appropriate request handler
+     function with a pointer to temporary storage containing the data
+     payload (in a buffer which is suitably aligned to hold any
+     datatype), the number of data bytes transferred, and the M integer
+     arguments. The dynamic scope of the storage is the same as the
+     dynamic scope of the handler. The data should be copied if it is
+     needed beyond this scope.  Returns `GASNET_OK' on success.
+
+gasnet_AMRequestLongM
+.....................
+
+ - : int gasnet_AMRequestLongM ( gasnet_node_t DEST, gasnet_handler_t
+          HANDLER, void *SOURCE_ADDR, size_t NBYTES, void *DEST_ADDR,
+          gasnet_handlerarg_t ARG0, ..., gasnet_handlerarg_t ARGM-1 );
+     Send a long AM request to node DEST, to run the handler registered
+     on the destination node at handler table index HANDLER, with the
+     given M arguments.
+
+     The message also carries a data payload copied from the local
+     node's memory space as indicated by SOURCE_ADDR and NBYTES (which
+     need not fall within the registered data segment on the local
+     node).  The value of nbytes must be no larger than the value
+     returned by `gasnet_AMMaxLongRequest()', and is permitted to be
+     zero (in which case SOURCE_ADDR is ignored and the BUF value
+     passed to the handler is undefined).  The memory specified by
+     [DEST_ADDR...(DEST_ADDR+NBYTES-1)] must fall entirely within the
+     memory segment registered for remote access by the destination
+     node. This area will receive the data transfer before the handler
+     runs.
+
+     If DEST is the current node (i.e. loopback) and the source and
+     destination memory overlap, the result is undefined.
+     `gasnet_AMRequestLongM' returns control to the calling thread of
+     computation after sending the associated request, and the source
+     memory may be freely modified once the function returns. The
+     active message is logically delivered after the bulk transfer
+     finishes. Upon receipt, the receiver invokes the appropriate
+     request handler function with a pointer into the memory segment
+     where the data was placed, the number of data bytes transferred,
+     and the M integer arguments.  Returns `GASNET_OK' on success.
+
+gasnet_AMRequestLongAsyncM
+..........................
+
+ - : int gasnet_AMRequestLongAsyncM ( gasnet_node_t DEST,
+          gasnet_handler_t HANDLER, void *SOURCE_ADDR, size_t NBYTES,
+          void *DEST_ADDR, gasnet_handlerarg_t ARG0, ...,
+          gasnet_handlerarg_t ARGM-1 );
+     `gasnet_AMRequestLongAsyncM()' has identical semantics to
+     `gasnet_AMRequestLongM()', except that the handler is required to
+     send an AM reply and the data payload source memory must NOT be
+     modified until this matching reply handler has begun execution.
+     Some implementations may leverage this additional constraint to
+     provide higher performance (e.g. by reducing extra data copying).
+
+   *Implementor's Note:*
+   * Note that unlike the AM2.0 function of similar name, this function
+     is permitted to block temporarily if the network is unable to
+     immediately accept the new request.
+
+
+Active Message Reply Functions
+------------------------------
+
+   The following active message reply functions may only be called from
+the context of a running active message request handler, and a reply
+function may be called at most once from any given request handler (it
+is an error to do otherwise).
+
+gasnet_AMReplyShortM
+....................
+
+ - : int gasnet_AMReplyShortM ( gasnet_token_t TOKEN, gasnet_handler_t
+          HANDLER, gasnet_handlerarg_t ARG0, ..., gasnet_handlerarg_t
+          ARGM-1 );
+     Send a short AM reply to the indicated HANDLER on the requesting
+     node (i.e. the node responsible for this particular invocation of
+     the request handler), and include the given M arguments.
+     `gasnet_AMReplyShortM' returns control to the calling thread of
+     computation after sending the reply message.
+
+     Upon receipt, the receiver invokes the appropriate active message
+     reply handler function with the M integer arguments.  Returns
+     `GASNET_OK' on success.
+
+gasnet_AMReplyMediumM
+.....................
+
+ - : int gasnet_AMReplyMediumM ( gasnet_token_t TOKEN, gasnet_handler_t
+          HANDLER, void *SOURCE_ADDR, size_t NBYTES,
+          gasnet_handlerarg_t ARG0, ..., gasnet_handlerarg_t ARGM-1 );
+     Send a medium AM reply to the indicated HANDLER on the requesting
+     node (i.e. the node responsible for this particular invocation of
+     the request handler), with the given M arguments and given data
+     payload copied from the local node's memory space (SOURCE_ADDR
+     need not fall within the registered data segment on the local
+     node).  The value of NBYTES must be no larger than the value
+     returned by `gasnet_AMMaxMedium()', and is permitted to be zero
+     (in which case SOURCE_ADDR is ignored and the BUF value passed to
+     the handler is undefined).  `gasnet_AMReplyMediumM' returns
+     control to the calling thread of computation after sending the
+     associated reply, and the source memory may be freely modified
+     once the function returns. The active message is logically
+     delivered after the data transfer finishes.
+
+     Upon receipt, the receiver invokes the appropriate reply handler
+     function with a pointer to temporary storage containing the data
+     payload, the number of data bytes transferred, and the M integer
+     arguments. The dynamic scope of the storage is the same as the
+     dynamic scope of the handler. The data should be copied if it is
+     needed beyond this scope.  Returns `GASNET_OK' on success.
+
+gasnet_AMReplyLongM
+...................
+
+ - : int gasnet_AMReplyLongM ( gasnet_token_t TOKEN, gasnet_handler_t
+          HANDLER, void *SOURCE_ADDR, size_t NBYTES, void *DEST_ADDR,
+          gasnet_handlerarg_t ARG0, ..., gasnet_handlerarg_t ARGM-1 );
+     Send a long AM reply to the indicated HANDLER on the requesting
+     node (i.e. the node responsible for this particular invocation of
+     the request handler), with the given M arguments and given data
+     payload copied from the local node's memory space (SOURCE_ADDR
+     need not fall within the registered data segment on the local
+     node).  The value of NBYTES must be no larger than the value
+     returned by `gasnet_AMMaxLongReply()', and is permitted to be zero
+     (in which case SOURCE_ADDR is ignored and the BUF value passed to
+     the handler is undefined).  The memory specified by
+     [DEST_ADDR...(DEST_ADDR+NBYTES-1)] must fall entirely within the
+     memory segment registered for remote access by the destination
+     node.  If dest is the current node (i.e. loopback) and the source
+     and destination memory overlap, the result is undefined.
+     `gasnet_AMReplyLongM' returns control to the calling thread of
+     computation after sending the associated reply, and the source
+     memory may be freely modified once the function returns. The
+     active message is logically delivered after the bulk transfer
+     finishes.
+
+     Upon receipt, the receiver invokes the appropriate reply handler
+     function with a pointer into the memory segment where the data was
+     placed, the number of data bytes transferred, and the M integer
+     arguments.  Returns `GASNET_OK' on success.
+
+Misc. Active Message Functions
+------------------------------
+
+gasnet_AMPoll
+.............
+
+ - : int gasnet_AMPoll ()
+     An explicit call to service the network, process pending messages
+     and run handlers as appropriate.  Most of the message-sending
+     primitives in GASNet poll the network implicitly.  Purely
+     polling-based implementations of GASNet may require occasional
+     calls to this function to ensure progress of remote nodes during
+     compute-only loops. Any client code which spin-waits for the
+     arrival of a message should call this function within the spin
+     loop to optimize response time.  This call may be a no-op on some
+     implementations (e.g. purely interrupt-based implementations).
+     Returns `GASNET_OK' unless an error condition was detected.
+
+GASNET_BLOCKUNTIL
+.................
+
+   `#define GASNET_BLOCKUNTIL(cond) ???'
+
+   This is a macro which implements a busy-wait/blocking polling loop
+in the way most efficient for the current GASNet core implementation.
+The macro blocks execution of the current thread and services the
+network until the provided condition becomes true. COND is an arbitrary
+C expression which will be evaluated by the macro one or more times as
+active messages arrive until the condition evaluates to a non-zero
+value. COND is an expression whose value is altered by the execution of
+an AM handler which the client thread is waiting for - GASNet may
+safely assume that the value of COND will only change while an AM
+handler is executing.
+
+   Example usage:
+      int doneflag = 0;
+      gasnet_AMRequestShort1(..., &doneflag); // reply handler sets doneflag to 1
+      GASNET_BLOCKUNTIL(doneflag == 1);
+
+   Note that code like this would be illegal and could cause node 0 to
+sleep forever:
+      static int doneflag = 0;
+      node 0:                                 node 1:
+      GASNET_BLOCKUNTIL(doneflag == 1);       gasnet_put_val(0, &doneflag, 1, sizeof(int));
+   because `gasnet_put_val' (and other extended API functions) might
+not be implemented using AM handlers.  Also note that COND may be
+evaluated concurrently with handler execution, so the client is
+responsible for negotiating any atomicity concerns between the cond
+expression and handlers (for example, protecting both with a
+handler-safe lock if the COND expression reads two or more values which
+are all updated by handlers). Finally, note that unsynchronized handler
+code which modifies one or more locations and then performs a flag
+write to signal a different thread may need to execute a local memory
+barrier before the flag write to ensure correct ordering on
+non-sequentially-consistent SMP hardware.
+
+   *Implementor's Note:*
+   * one trivial implementation: `#define GASNET_BLOCKUNTIL(cond) while
+     (!(cond)) gasnet_AMPoll()'
+
+   * smarter implementations may choose to spin for awhile and then
+     block
+
+   * Any implementation that includes blocking must ensure progress if
+     all client threads call GASNET_BLOCKUNTIL(), and must ensure the
+     blocked thread is awakened even if the handler is run
+     synchronously during a `gasnet_AMPoll()' call from a different
+     client thread. Other client threads performing sends or polls must
+     not be prevented from making progress by the blocking thread
+     (possibly a motivation _against_ the "trivial implementation"
+     above).
+
+
+gasnet_AMGetMsgSource
+.....................
+
+ - : int gasnet_AMGetMsgSource (gasnet_token_t TOKEN, gasnet_node_t
+          *SRCINDEX)
+     Can be called by handlers to query the source of the message being
+     handled.  The TOKEN argument must be the token passed into the
+     handler on entry.  Returns `GASNET_OK' on success.
+
+Atomicity Control
+=================
+
+Atomicity semantics of handlers
+-------------------------------
+
+   Handlers may run asynchronously with respect to the main computation
+(in an implementation which uses interrupts to run some or all
+handlers), and they may run concurrently with each other on separate
+threads (e.g. in a CLUMP implementation where several threads may be
+polling the network at once). An implementation using interrupts may
+result in handler code running within a signal handler context. Some
+implementations may even choose to run handlers on a separate private
+thread created by GASNet (making handlers asynchronous with respect to
+all client threads). Note that polling-based GASNet implementations are
+likely to poll (and possibly run handlers) from within _any_ GASNet
+call (i.e. not just `gasnet_AMPoll()'). Because of all this, handler
+code should run quickly and to completion without making blocking
+calls, and should not make assumptions about the context in which it is
+being run (special care must be taken to ensure safety in a signal
+handler context, see below).
+
+   Regardless, handlers themselves are not interruptible - any given
+thread will only be running a single AM handler at a time and will
+never be interrupted to run another AM handler (there is one exception
+to this rule - the `gasnet_AMReply*()' call in a request handler may
+cause reply handlers to run synchronously, which may be necessary to
+avoid deadlock in some implementations. This should not be a problem
+since `gasnet_AMReply*()' is often the last action taken by a request
+handler).  Handlers are specifically prohibited from initiating random
+network communication to prevent deadlock - request handlers must
+generate at most one reply (to the requestor) and make no other
+communication calls (including polling), and reply handlers may not
+communicate or poll at all.
+
+   The asynchronous nature of handlers requires two mechanisms to make
+them safe: a mechanism to ensure signal safety for GASNet
+implementations using interrupt-based mechanisms, and a locking
+mechanism to allow atomic updates from handlers to data structures
+shared with the client threads and other handlers.
+
+   (see `http://www.cs.berkeley.edu/~bonachea/upc/' for a more detailed
+discussion on handler atomicity)
+
+No-Interrupt Sections - Ensuring signal-safety for handlers
+-----------------------------------------------------------
+
+   Traditionally, code running in signal handler context is extremely
+circumscribed in what it can do: e.g. none of the standard
+pthreads/System V synchronization calls are on the list of signal-safe
+functions (for such a list see `POSIX System Interfaces 2.4, IEEE Std
+1003.1-2001').  Note that even most "thread-safe" libraries will break
+or deadlock if called from a signal handler by the same thread
+currently executing a different call to that library in an earlier
+stack frame. One specific case where this is likely to arise in
+practice is calls to `malloc()'/`free()'. To overcome these
+limitations, and allow our handlers to be more useful, the normal
+limitations on signal handlers will be avoided by allowing the client
+thread to temporarily disable the network interrupts that run handlers.
+All function calls that are not signal-safe and could possibly access
+state shared by functions also called from handlers MUST be called
+within a GASNet "No-Interrupt Section":
+
+gasnet_hold_interrupts, gasnet_resume_interrupts
+................................................
+
+ - : void gasnet_hold_interrupts ()
+ - : void gasnet_resume_interrupts ()
+     `gasnet_hold_interrupts()' and `gasnet_resume_interrupts()' are
+     used to define a GASNet No-Interrupt Section (any code which
+     dynamically executes between the hold and resume calls is said to
+     be "inside" the No-Interrupt Section).  These are likely to be
+     implemented as macros and highly tuned for efficiency.  The hold
+     and resume calls must be paired, and may _not_ be nested
+     recursively or the results are undefined (this means that clients
+     should be especially careful when calling other functions in the
+     client from within a No-Interrupt Section).  Both calls will
+     return immediately in the common case, although one or both may
+     cause messages to be serviced on some implementations.  GASNet
+     guarantees that no handlers will run asynchronously *on the
+     current thread* within the No-Interrupt Section.  The no-interrupt
+     state is a per-thread setting, and GASNet may continue running
+     handlers synchronously or asynchronously on other client threads
+     or GASNet-private threads (even in a `GASNET_SEQ' configuration) -
+     specifically, a No-Interrupt Section does *not* guarantee
+     atomicity with respect to handler code, it merely provides a way
+     to ensure that handlers won't run on a given thread while it's
+     inside a call to a non-signal-safe library.
+
+Restrictions on No-Interrupt Sections
+-------------------------------------
+
+   There is a strict set of conventions governing the use of
+No-Interrupt Sections which must be followed in order to ensure correct
+operation on all GASNet implementations. Clients which violate any of
+these rules may be subject to intermittent crashes, fatal errors or
+network deadlocks.
+
+   * `gasnet_hold_interrupts()' and `gasnet_resume_interrupts()' need
+     not be called from within a handler context - handlers are run
+     within an implicit No-Interrupt Section, and
+     `gasnet_hold_interrupts()' and `gasnet_resume_interrupts()' calls
+     are ignored within a handler context.
+
+   * Code in a No-Interrupt Section must not call any GASNet functions
+     that may send requests or synchronously run handlers -
+     specifically, the only GASNet functions which may legally be
+     called within the No-Interrupt Section are:
+          `gasnet_mynode()', `gasnet_nodes()', `gasnet_hsl_*()', `gasnet_exit()', `gasnet_AMReply*()'
+     Note that due to the previous rule, these are also the only GASNet
+     functions that may legally be called within a handler context (and
+     `gasnet_AMReply*()' is only legal in a request handler).
+
+   * Code in a No-Interrupt Section must never block or spin-wait for an
+     unbounded amount of time, especially when awaiting a result
+     produced by a handler. The _only_ exception to this rule is that a
+     thread may call `gasnet_hsl_lock' within a No-Interrupt Section
+     (subject to the rules in section *note Restrictions on
+     Handler-Safe Locks::).
+
+   * No-Interrupt Sections should only be held "briefly" to avoid
+     starving the network (could cause performance degradation, but
+     should not affect correctness). Very long No-Interrupt Sections
+     (i.e. on the order of 10 sec or more) could cause some GASNet
+     implementations employing timeout-based mechanisms to fail (e.g.
+     remote nodes may decide this node is dead and abort the job).
+
+   *Implementor's Note:*
+   * One possible implementation: Keep a bit for each thread indicating
+     whether or not a No-Interrupt Section is in effect, which is
+     checked by all asynchronous signal handlers.  If a signal arrives
+     while a No-Interrupt Section is in effect, a different per-thread
+     bit in memory will be marked indicating a "missed GASNet signal":
+     the `gasnet_resume_interrupts()' call will check this bit, and if
+     it is set, the action for the signal will be taken (the action for
+     a GASNet signal is always to check the queue of incoming network
+     messages, so there's no ambiguity on what the signal meant. Since
+     messages are queued, the single 'signal missed' bit is sufficient
+     for an arbitrary number of missed signals during a single
+     No-Interrupt Section - GASNet messages will be removed and
+     processed until the queue is empty).
+
+   * Implementation needs to hold a No-Interrupt Section over a thread
+     while running handlers or holding HSL's
+
+   * Strictly polling-based implementations which never interrupt a
+     thread can implement these as a no-op.
+
+
+Handler-Safe Locks
+------------------
+
+   In order to support handlers atomically updating data structures
+accessed by the main-line client code and other handlers, GASNet
+provides the Handler-Safe Lock (HSL) mechanism. As the name implies,
+these are a special kind of lock which are distinguished as being the
+*only* type of lock which may be safely acquired from a handler
+context. There is also a set of restrictions on their usage which
+allows this to be safe (see below). All lock-protected data structures
+in the client that need to be accessed by handlers should be protected
+using a Handler-Safe Lock (i.e. instead of a standard POSIX mutex).
+
+gasnet_hsl_t
+............
+
+   `gasnet_hsl_t' is an opaque type representing a Handler-Safe Lock.
+HSL's operate analogously to POSIX mutexes, in that they are always
+manipulated using a pointer.
+
+gasnet_hsl_init, gasnet_hsl_destroy
+...................................
+
+   `gasnet_hsl_t hsl = GASNET_HSL_INITIALIZER;'
+
+ - : void gasnet_hsl_init (gasnet_hsl_t *HSL)
+ - : void gasnet_hsl_destroy (gasnet_hsl_t *HSL)
+     Similarly to POSIX mutexes, HSL's can be created in two ways. They
+     can be statically declared and initialized using the
+     `GASNET_HSL_INITIALIZER' constant. Alternately, HSL's allocated
+     using other means (such as dynamic allocation) may be initialized
+     by calling `gasnet_hsl_init()'.  `gasnet_hsl_destroy()' may be
+     called on either type of HSL once it's no longer needed to release
+     any system resources associated with it.  It is erroneous to call
+     `gasnet_hsl_init()' on a given HSL more than once. It is erroneous
+     to destroy an HSL which is currently locked. Any errors detected
+     in HSL initialization/destruction are fatal.
+
+gasnet_hsl_lock, gasnet_hsl_unlock
+..................................
+
+ - : void gasnet_hsl_lock (gasnet_hsl_t *HSL)
+ - : int gasnet_hsl_trylock (gasnet_hsl_t *HSL)
+ - : void gasnet_hsl_unlock (gasnet_hsl_t *HSL)
+     Lock and unlock HSL's.
+
+     `gasnet_hsl_lock(hsl)' will block until the HSL lock can be
+     acquired by the current thread. `gasnet_hsl_lock()' may be called
+     from within main-line client code or from within handlers - this
+     is the *only* blocking call which is permitted to execute within a
+     GASNet handler context (e.g. it is erroneous to call POSIX mutex
+     locking functions).
+
+     `gasnet_hsl_trylock(hsl)' attempts to acquire `hsl' for the current
+     thread, returning immediately (without blocking).  If the lock was
+     successfully acquired, this function returns `GASNET_OK'.  If the
+     lock could not be acquired (e.g it was found to be held by another
+     thread) then this function returns GASNET_ERR_NOT_READY and the
+     lock is not acquired.  It is _not_ legal for an AM handler to
+     spin-poll a lock without bound using `gasnet_hsl_trylock()'
+     waiting for success - AM handlers must always use
+     `gasnet_hsl_lock()' when they wish to block to acquire an HSL.
+
+     `gasnet_hsl_unlock(hsl)' releases the HSL lock previously acquired
+     using `gasnet_hsl_lock(hsl)' or a successful
+     `gasnet_hsl_trylock(hsl)', and not yet released.  It is erroneous
+     to call any of these functions on HSL's which have not been
+     properly initialized.
+
+     Note that under the `GASNET_SEQ' configuration, HSL locking
+     functions may only be called from handlers and the designated
+     GASNet client thread (_not_ from other client threads that may
+     happen to exist - those threads are not permitted to make _any_
+     GASNet calls, which includes HSL locking calls).
+
+     All HSL locking/unlocking calls must follow the usage rules
+     documented in the next section.
+
+
+Restrictions on Handler-Safe Locks
+----------------------------------
+
+   There is a strict set of conventions governing the use of HSL's
+which must be followed in order to ensure correct operation on all
+GASNet implementations. Amongst other things, the restrictions are
+designed to ensure that HSL's are always held for a strictly bounded
+amount of time, to ensure that acquiring them from within a handler
+can't lead to deadlock.  Clients which violate any of these rules may
+be subject to intermittent crashes, fatal errors or network deadlocks.
+
+   * Code executing on a thread holding an HSL is implicitly within a
+     No-Interrupt Section, and must follow all the restrictions on code
+     within a No-Interrupt Section (*note Restrictions on No-Interrupt
+     Sections::).  Calls to `gasnet_hold_interrupts()' and
+     `gasnet_resume_interrupts()' are ignored while holding an HSL.
+
+   * Any handler which locks one or more HSL's *must* unlock them all
+     before returning or calling `gasnet_AMReply*()'
+
+   * HSL's may *not* be locked recursively (i.e. calling
+     `gasnet_hsl_lock()' or `gasnet_hsl_trylock(hsl)' on a lock already
+     held by the current thread) and attempting to do so will lead to
+     undefined behavior. It *is* permitted for a thread to acquire more
+     than one HSL, although the traditional cautions about the
+     possibility of deadlock in the presence of multiple locks apply
+     (e.g. the common solution is to define a total order on locks and
+     always acquire them in a monotonically ascending sequence).
+
+   * HSL's must be unlocked in the reverse order they were locked (e.g.
+     lock A; lock B; ... unlock B; unlock A; is legal - reversing the
+     order of unlocks is erroneous)
+
+   * HSL's may not be shared across GASNet processes executing on a
+     machine - for example, it is specifically disallowed to place an
+     HSL in a system V or mmapped shared memory segment and attempt to
+     access it from two different GASNet processes.
+
+   *Implementor's Note:*
+   * HSL's are likely to just be a thin wrapper around a POSIX mutex -
+     need to add just enough state/code to ensure the safety properties
+     (must be a real lock, even under `GASNET_PARSYNC' because client
+     may still have multiple threads).  The only specific action
+     required is that a No-Interrupt Section is enforced while the
+     main-line code is holding an HSL (must be careful this works
+     properly when multiple HSL's are held or when running in a
+     handler).
+
+   * Robust implementations may add extra error checking to help
+     discover violations of the restrictions, at least when compiled in
+     a debugging mode - for example, it should be easy to detect:
+     attempts at recursive locking on HSL's, incorrectly ordered
+     unlocks, handlers that fail to release HSL's, explicit calls to
+     `gasnet_hold_interrupts()' and `gasnet_resume_interrupts()' in a
+     handler or while an HSL is held or in a No-Interrupt Section, and
+     illegal calls to GASNet messaging functions while holding an HSL
+     or inside a No-Interrupt Section.
+
+ 
