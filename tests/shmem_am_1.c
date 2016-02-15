@@ -29,7 +29,7 @@ int main(int argc, char **argv)
       { hidx_ping_shorthandler,  ping_shorthandler  } 
   };  
   
-  GASNET_SAFE(gasnet_init(&argc, &argv));
+  //GASNET_SAFE(gasnet_init(&argc, &argv));
   shmem_init();
   size_shmem = shmem_n_pes();
   rank_shmem = shmem_my_pe();
